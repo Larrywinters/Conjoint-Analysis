@@ -1,0 +1,326 @@
+---
+title: "Conjoint Analysis - Tory Horse Case"
+author: "Winters"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+getwd()
+```
+
+## Case Background
+
+A Tory horse company is considering to use conjoint data to understand the segmentation of customers, also product line pricing, and also do market stimulation for completition. It collected the rating choice data from 200 parents who have a 2 or 3-4 year-old child.
+
+Key information are shown below:
+A Priori Segmentation: Gender(Female/Male) and Age(2/3 to 4)
+
+Product Attributes & Level: Price(119.99/139.99), Height(18 inch / 26 inch), Motion(Rocking/Bouncing), Style(Glamorous/Racing)
+
+Product Profilo: 
+P13: $139.99 + 18 inch + Glamorous + Rocking (Our offering)
+P5: $139.99 + 18 inch + Racing + Rocking (Our offering)
+P7: $139.99 + 26 inch + Racing + Rocking (Competitor)
+
+Market Size: 4000 Units
+Fixed Cost Per Product Line Per Year: 20,000
+Product Switching Cost: One Third of the product line cost
+Whole Sales Price: 111.99 for 139.99, 95.99 for 119.99
+Product Variable Costs
+
+Product      | VC
+18" Rocking  | 33 
+26" Rocking  | 41
+18" Bouncing | 21
+26" Bouncing | 29
+Styling does not change the variable costs.
+
+## Analytical Purpose
+
+ A. Conduct Benefit Segementation via Cluster Analysis
+ B. Test a priori segmentation and learn the perference of a priori segmentation
+ C. Simulate market shares for different product-line scenarios and competitive response
+
+## Analytical Process
+
+ 1. Use Regression to estimate the conjoint model at the individual level and predict for missing profile
+ 2. Conduct Benefit Segmentation via Cluster Analysis of Conjoint Part-Utilities.
+ 3. Conduct a priori segmentation and finding insight from the a priori segmentation
+ 4. Simulate market shares for different product-line scenarios.
+
+# Data Load and Data Quality Check 
+
+```{r Load Data and Data Quality Check}
+filename <- "GBA424 - Toy Horse Case Data"
+datainput <- load(paste0(filename,".RData"))
+str(conjointData)
+str(profilesData)
+str(respondentData)
+apply(conjointData,2, function(x) any(is.na(x))) # NA in ratings
+apply(respondentData,2, function(x) any(is.na(x))) # No NA detected
+apply(profilesData,2, function(x) any(is.na(x))) # No NA detected
+head(conjointData[is.na(conjointData$ratings),"profile"], 10)
+```
+From the analysis above, we find the for profile 3,6,10,16, they are missing. This is because they are not included in the conjoint testing so we need to predict those rating according to each individual partworths.
+
+# Step 1: Use Regression to estimate the conjoint model at the individual level and predict for missing profile
+
+```{r Retrieve the partworths for each individual and all profile}
+individual_partworths <- data.frame( ID = 1:200, 'Intercept' = rep(NA, 200), 'priceLow' = rep(NA, 200), 'sizeLarge' = rep(NA,200), 'motionRocking'= rep(NA,200), 'styleGlamourous' = rep(NA,200))
+
+for (i in 1:200) {
+  model <- lm(ratings~price+size+motion+style, data = conjointData[conjointData$ID == i,])
+  for (k in 1:16) {
+    if (is.na(conjointData[conjointData$ID == i & conjointData$profile == k,3])) {
+      conjointData[conjointData$ID == i & conjointData$profile == k,3] <-
+        predict(model,conjointData[conjointData$ID == i & conjointData$profile == k,3:7])
+    } else NULL
+  }
+  for (j in 2:6) {
+    individual_partworths[i,j] <- coef(model)[j-1]
+  }
+}
+
+head(individual_partworths,5)
+head(conjointData,6)
+```
+
+# Step 2: Conduct Benefit Segmentation via Cluster Analysis of Conjoint Part-Utilities.
+
+**mclust**
+First, we use the mclust package.
+Mclust package contains 14 different model to do cluster.
+We specify from 1 to 20 groups as the components of clustering.
+Important note is that BIC in the picture is not Bayesian Information Criterion (for this one the smaller the better.)
+```{r}
+library(mclust)
+declass_partworths <- individual_partworths[,-1]
+m_clust <- Mclust(as.matrix(declass_partworths), G = 1:20)
+plot(m_clust, "BIC")
+```
+From the chart above, we can infer that the number of cluster should be somewhere around 3. But we need use more method to confirm this finding.
+
+
+**Nbclust**
+Nbclust is similar to the mclust. Nbclust define a dozen of appraisal index. We need find the number of cluster that satisfying the most of it. I give min cluster as 1 and the max one as 10
+
+```{r}
+library(NbClust)
+set.seed(1234)
+nb_clust <- NbClust(declass_partworths,distance = "euclidean",min.nc=2, max.nc=10, method = "kmeans",index = "alllong", alphaBeale = 0.1)
+barplot(table(nb_clust$Best.nc[1,]),xlab = "Number of cluster",ylab = "Index Supported")
+
+```
+According to the majority rule, the best number of clusters is  3.
+
+**WSS & Silhouette**
+Create a clustTest functon and apply within sum of squared errors as well average silhouette width to do cluster analysis.
+```{r}
+library(cluster)
+library(fpc)
+library(factoextra)
+library(gridExtra)
+
+clustTest = function(toClust,print=TRUE,scale=TRUE,maxClusts=15,seed=12345,nstart=20,iter.max=100){
+  if(scale){ toClust = scale(toClust);}
+  set.seed(seed)
+  wss <- (nrow(toClust)-1)*sum(apply(toClust,2,var))
+  for (i in 2:maxClusts) wss[i] <- sum(kmeans(toClust,centers=i,nstart=nstart,iter.max=iter.max)$withinss)
+  gpw = fviz_nbclust(toClust,kmeans,method="wss",iter.max=iter.max,nstart=nstart,k.max=maxClusts) 
+  pm1 = pamk(toClust,scaling=TRUE)
+  gps = fviz_nbclust(toClust,kmeans,method="silhouette",iter.max=iter.max,nstart=nstart,k.max=maxClusts) 
+  if(print){
+    grid.arrange(gpw,gps, nrow = 1)
+  }
+  list(wss=wss,pm1=pm1$nc,gpw=gpw,gps=gps)
+}
+clustTest(declass_partworths)
+```
+The result is also confirmed with two method above. So we are quite confident the 3 clusters perhaps is a good way to do the segmentation.
+
+# Visualizing what is in the cluster?
+Using kmeans we plot three graph to describe the details within those clusters：
+pie chart with participant percentages
+ellipse plot that indicates cluster definitions against principle components
+barplot of the cluster means
+
+```{r}
+set.seed(12345)
+km <- kmeans(declass_partworths,3,iter.max = 100, nstart = 20)
+plotClust = function(km,toClust,discPlot=FALSE){
+  nc = length(km$size)
+  if(discPlot){par(mfrow=c(2,2))}
+  else {par(mfrow=c(3,1))}
+  percsize = paste(1:nc," = ",format(km$size/sum(km$size)*100,digits=2),"%",sep="")
+  pie(km$size,labels=percsize,col=1:nc)
+  
+  clusplot(toClust, km$cluster, color=TRUE, shade=TRUE,
+           labels=2, lines=0,col.clus=1:nc); #plot clusters against principal components
+  
+  if(discPlot){
+    plotcluster(toClust, km$cluster,col=km$cluster); #plot against discriminant functions ()
+  }
+  rng = range(km$centers)
+  dist = rng[2]-rng[1]
+  locs = km$centers+.05*dist*ifelse(km$centers>0,1,-1)
+  bm = barplot(km$centers,beside=TRUE,col=1:nc,main="Cluster Means",ylim=rng+dist*c(-.1,.1))
+  text(bm,locs,formatC(km$centers,format="f",digits=1))
+}
+plotClust(km, declass_partworths)
+```
+
+## Step 3: Conduct a priori segmentation and finding insight from the a priori segmentation
+
+A priori segmentation is focus on age and gender. Therefore, we include age, and gender as the interaction effect in the regression.
+
+```{r}
+a_priori <- merge(conjointData,respondentData, on = "ID", all = T)
+a_priori <- a_priori[,c(-1,-2)]
+summary(lm(ratings~.,data = a_priori))
+summary(lm(ratings~(price+size+motion+style)*age, data = a_priori)) 
+summary(lm(ratings~(price+size+motion+style)*gender, data = a_priori)) 
+```
+price:age, motion:age is significant. Different age groups might have different preference in age and motion.
+The interacton of gender is quite significant across all the variables. Subsetting those data accross age and gender might be more helepful in capturing the interaction.
+
+```{r}
+maleData <- a_priori[a_priori$gender=="0",]
+femaleData <- a_priori[a_priori$gender=="1",]
+summary(lm(ratings~price+size+motion+style,data=maleData)) #style significant
+summary(lm(ratings~price+size+motion+style,data=femaleData))
+```
+Children from both gender perfer low price, bigger size.
+Boys seem to prefer racing over glamorous. No obvious prefernce among motion type.
+Girls seem to prefer rocking over bouncing and glamorous over racing.
+
+```{r}
+twoData <- a_priori[a_priori$age=="0",]
+threefourData <- a_priori[a_priori$age=="1",]
+summary(lm(ratings~price+size+motion+style,data=twoData)) #motion significant
+summary(lm(ratings~price+size+motion+style,data=threefourData))
+```
+Interesting, three to four year-old kid seems have no preference in motion and style. While two year-old seems to prefer rocking.
+
+## Step 4: Simulate market shares for different product-line scenarios and competitive response
+Reshape the data into a wide format.
+Build functions to calculate the shares for different options. Solving ties problems, using another matrix to map the largest rating for a customer and then calculate the shares.
+
+```{r}
+rating_profile <- conjointData[,c(1,2,3)]
+library("reshape")
+rating_profile <- cast(rating_profile, formula = ID ~ profile)
+colnames(rating_profile) <- c('id',paste("Profile", 1:16, sep = '_'))
+
+simFCDecisions = function(scen,data,ascend=FALSE){
+  test = data[,scen] 
+  Matrix = matrix(0,200,length(test))
+  colnames(Matrix) = colnames(test)
+  test$max = 0
+  if(ascend){
+    for (y in 1:200){
+      test$max[y] = min(test[y,])
+    }
+  } else {
+    for (y in 1:200){
+      test$max[y] = max(test[y,])
+    }
+  }
+  for (r in 1:200){
+    for (c in 1:(length(test)-1)){
+      if(test[r,c]==test[r,"max"]){
+        Matrix[r,c] = 1
+      }
+    }
+  }
+  Matrix = as.data.frame(Matrix)
+  Matrix
+}
+
+calcUnitShares = function(decisions){
+  colSums(decisions)/sum(decisions) 
+}
+
+simFCShares=function(scen,data,ascend=FALSE){
+  decs = simFCDecisions(scen,data,ascend)
+  calcUnitShares(decs)
+}
+```
+
+**Finding the existing market scen**
+We have the profile 13,5,7 in the market and 13,5 are ours.
+
+```{r}
+c1 <- simFCShares(c(5,13,7),rating_profile[,2:17])
+c1
+```
+Now we have a total share of 43 percent.
+
+What if the competitors change their price lowering their price from 139.99 to 119.99?
+```{r}
+c2 <- simFCShares(c(5,13,8), rating_profile[,2:17])
+c2
+```
+From the market simulation above we find we might only have 7 per cent of share in the market
+
+**Plan A and Plan B**
+```{r}
+#Plan A
+simFCShares(c(3,7,15),rating_profile[,2:17]) 
+#revenue = (111.99-29)*4000*0.3823529 = 126925.9
+#revenue = (111.99-41)*4000*0.4411765  = 125276.5
+#cost = 20000*2+20000/3*2 = 53333.33
+#profit = 126925.9+125276.5-53333.33 = 198869.1
+simFCShares(c(4,8,16),rating_profile[,2:17]) 
+#revenue = (95.99-29)*4000*0.3474178 = 93094.07
+#revenue = (95.99-41)*4000*0.4507042 = 99136.9
+#cost = 20000*2 = 40000
+#profit = 93094.07+99136.9-40000 = 152231
+#totalprofit = 198869.1+152231*4 = 807793.1
+
+#Plan B
+simFCShares(c(5,7,13),rating_profile[,2:17]) #current
+simFCShares(c(7,11),rating_profile[,2:17]) #first year
+#revenue = (111.99-29)*4000*0.563981 = 187219.1
+#cost = 20000+20000/3 = 26666.67
+#profit = 187219.1-26666.67 = 160552.4
+simFCShares(c(2,7),rating_profile[,2:17]) #second year
+#revenue = (95.99-21)*4000*0.6568627 = 197032.5
+#cost = 20000+20000/3 = 26666.67
+#profit = 197032.5-26666.67 = 170365.8
+simFCShares(c(2,7,15),rating_profile[,2:17]) #third year 
+#revenue = (95.99-21)*4000*0.62376238 = 187103.8
+#revenue = (111.99-41)*4000*0.33168317 = 94184.75
+#cost = 20000*2+20000/3 = 46666.67
+#profit = 187103.8+94184.75-46666.67 = 234621.9
+simFCShares(c(2,8,16),rating_profile[,2:17])
+#revenue = (95.99-21)*4000*0.3287037 = 98597.96
+#revenue = (95.99-41)*4000*0.4074074 = 89613.33
+#cost = 20000*2 = 40000
+#profit = 98597.96+89613.33-40000 = 148211.3
+#totalprofit = 160552.4+170365.8+234621.9+148211.3*2 = 861962.7
+
+#Plan B (sensitivity analysis)
+simFCShares(c(5,7,13),rating_profile[,2:17]) #current
+simFCShares(c(7,11),rating_profile[,2:17]) #first year
+#revenue = (111.99-29)*4000*0.563981 = 187219.1
+#cost = 20000+20000/3 = 26666.67
+#profit = 187219.1-26666.67 = 160552.4
+simFCShares(c(2,7),rating_profile[,2:17]) #second year
+#revenue = (95.99-21)*4000*0.6568627 = 197032.5
+#cost = 20000+20000/3 = 26666.67
+#profit = 197032.5-26666.67 = 170365.8
+simFCShares(c(2,8,15),rating_profile[,2:17]) #third year 
+#revenue = (95.99-21)*4000*0.3461538 = 103832.3
+#revenue = (111.99-41)*4000*0.2163462 = 61433.67
+#cost = 20000*2+20000/3 = 46666.67
+#profit = 103832.3+61433.67-46666.67 = 118599.3
+simFCShares(c(2,8,16),rating_profile[,2:17]) #forth year
+#revenue = (95.99-21)*4000*0.3287037 = 98597.96
+#revenue = (95.99-41)*4000*0.4074074  = 89613.33
+#cost = 20000*2 = 40000
+#profit = 98597.96+89613.33-40000 = 148211.3
+#totalprofit = 160552.4+170365.8+118599.3+148211.3*2 = 745940.1
+#total = 861962.7*0.6+745940.1*0.4 = 815553.7
+```
+
